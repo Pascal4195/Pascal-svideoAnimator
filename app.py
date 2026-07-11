@@ -6,63 +6,56 @@ import subprocess
 import threading
 import traceback
 
-import torch
-torch.set_num_threads(1)  # avoid OpenMP spawning multiple threads, each with its own memory overhead
+import numpy as np
+import onnxruntime as ort
 from PIL import Image
 from flask import Flask, request, jsonify, send_from_directory, render_template_string
 
-from model import Generator
-
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 JOBS_DIR = os.path.join(APP_DIR, "jobs")
-WEIGHTS_PATH = os.path.join(APP_DIR, "weights", "face_paint_512_v2.pt")
-WEIGHTS_URL = "https://github.com/bryandlee/animegan2-pytorch/raw/main/weights/face_paint_512_v2.pt"
+# .onnx weights ship inside the repo itself — no runtime download needed
+WEIGHTS_PATH = os.path.join(APP_DIR, "weights", "face_paint_512_v2.onnx")
 
 os.makedirs(JOBS_DIR, exist_ok=True)
-os.makedirs(os.path.dirname(WEIGHTS_PATH), exist_ok=True)
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 60 * 1024 * 1024  # 60MB upload cap (free tier RAM is tight)
 
-# Hard server-side ceilings — enforced no matter what the client sends,
-# since free tier has only 512MB RAM total for the whole process.
-HARD_MAX_SIDE = 360
+# Hard server-side ceilings — enforced no matter what the client sends.
+# 480px is close to this model's own 512px training resolution — going
+# higher doesn't improve quality and risks running out of the 512MB
+# free-tier RAM budget (verified: 480px frame ≈ 466MB peak with ONNX
+# Runtime; 720px would need well over 1GB, not achievable free).
+HARD_MAX_SIDE = 480
 HARD_MAX_FPS = 10
 
 # in-memory job tracker: {job_id: {"status": ..., "progress": ..., "error": ...}}
 JOBS = {}
 
-DEVICE = "cpu"
-_model = None
-_model_lock = threading.Lock()
+_session = None
+_session_lock = threading.Lock()
 
 
-def get_model():
-    """Lazy-load the model once, on first use (keeps app boot fast)."""
-    global _model
-    with _model_lock:
-        if _model is None:
-            if not os.path.exists(WEIGHTS_PATH):
-                print("Downloading AnimeGANv2 weights...")
-                torch.hub.download_url_to_file(WEIGHTS_URL, WEIGHTS_PATH)
-            m = Generator()
-            state_dict = torch.load(WEIGHTS_PATH, map_location=DEVICE)
-            m.load_state_dict(state_dict)
-            m.to(DEVICE).eval()
-            _model = m
-        return _model
+def get_session():
+    """Lazy-load the ONNX session once, on first use (keeps app boot fast)."""
+    global _session
+    with _session_lock:
+        if _session is None:
+            so = ort.SessionOptions()
+            so.intra_op_num_threads = 1  # keep memory/CPU overhead minimal on free tier
+            _session = ort.InferenceSession(WEIGHTS_PATH, sess_options=so,
+                                             providers=["CPUExecutionProvider"])
+        return _session
 
 
-def to_tensor(img: Image.Image):
-    import numpy as np
+def to_input(img: Image.Image):
     x = np.asarray(img).astype("float32") / 127.5 - 1.0
-    x = torch.from_numpy(x).permute(2, 0, 1).unsqueeze(0)
+    x = x.transpose(2, 0, 1)[None, ...]  # HWC -> NCHW
     return x
 
 
-def to_image(t: torch.Tensor):
-    import numpy as np
-    x = t.squeeze(0).permute(1, 2, 0).detach().numpy()
+def to_image(out: np.ndarray):
+    x = out[0].transpose(1, 2, 0)
     x = (x + 1.0) * 127.5
     x = x.clip(0, 255).astype("uint8")
     return Image.fromarray(x)
@@ -101,35 +94,34 @@ def process_job(job_id, in_path, fps, max_side):
                 f"Use a shorter clip (under ~20 sec at {fps}fps)."
             )
 
-        model = get_model()
+        model = get_session()
         job["status"] = "converting"
         job["total_frames"] = total
 
-        with torch.no_grad():
-            for i, fname in enumerate(frame_files):
-                img = Image.open(os.path.join(frames_in, fname)).convert("RGB")
-                if max_side:
-                    w, h = img.size
-                    scale = max_side / max(w, h)
-                    if scale < 1:
-                        img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
-                    # keep dimensions divisible by 8 (model requirement)
-                    w2, h2 = img.size
-                    w2 -= w2 % 8
-                    h2 -= h2 % 8
-                    img = img.resize((max(w2, 8), max(h2, 8)), Image.LANCZOS)
+        for i, fname in enumerate(frame_files):
+            img = Image.open(os.path.join(frames_in, fname)).convert("RGB")
+            if max_side:
+                w, h = img.size
+                scale = max_side / max(w, h)
+                if scale < 1:
+                    img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+                # keep dimensions divisible by 8 (model requirement)
+                w2, h2 = img.size
+                w2 -= w2 % 8
+                h2 -= h2 % 8
+                img = img.resize((max(w2, 8), max(h2, 8)), Image.LANCZOS)
 
-                inp = to_tensor(img).to(DEVICE)
-                out = model(inp)
-                out_img = to_image(out)
-                out_img.save(os.path.join(frames_out, fname))
-                job["progress"] = i + 1
+            inp = to_input(img)
+            out = model.run(None, {"input": inp})[0]
+            out_img = to_image(out)
+            out_img.save(os.path.join(frames_out, fname))
+            job["progress"] = i + 1
 
-                # explicit cleanup — CPU tensors + PIL images can otherwise
-                # accumulate across hundreds of frames on a 512MB instance
-                del img, inp, out, out_img
-                if (i + 1) % 20 == 0:
-                    gc.collect()
+            # explicit cleanup — arrays/images can otherwise accumulate
+            # across hundreds of frames on a 512MB instance
+            del img, inp, out, out_img
+            if (i + 1) % 20 == 0:
+                gc.collect()
 
         job["status"] = "reassembling"
         out_video = os.path.join(work, "anime_no_audio.mp4")
@@ -243,7 +235,8 @@ INDEX_HTML = """
     <label>Max resolution (longest side)</label>
     <select name="max_side">
       <option value="240">240px (fastest, safest for free tier)</option>
-      <option value="360" selected>360px (max — higher will be capped)</option>
+      <option value="360">360px</option>
+      <option value="480" selected>480px (max — matches model's native training resolution)</option>
     </select>
     <p style="font-size:0.8rem;color:var(--text-dim);">Free-tier RAM is limited to 512MB — clips over ~20 sec or higher settings than these may fail. Keep clips short.</p>
     <button type="submit">Convert to Anime</button>
