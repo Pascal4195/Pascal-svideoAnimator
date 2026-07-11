@@ -1,4 +1,5 @@
 import os
+import gc
 import uuid
 import shutil
 import subprocess
@@ -6,6 +7,7 @@ import threading
 import traceback
 
 import torch
+torch.set_num_threads(1)  # avoid OpenMP spawning multiple threads, each with its own memory overhead
 from PIL import Image
 from flask import Flask, request, jsonify, send_from_directory, render_template_string
 
@@ -20,7 +22,12 @@ os.makedirs(JOBS_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(WEIGHTS_PATH), exist_ok=True)
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 300 * 1024 * 1024  # 300MB upload cap
+app.config["MAX_CONTENT_LENGTH"] = 60 * 1024 * 1024  # 60MB upload cap (free tier RAM is tight)
+
+# Hard server-side ceilings — enforced no matter what the client sends,
+# since free tier has only 512MB RAM total for the whole process.
+HARD_MAX_SIDE = 360
+HARD_MAX_FPS = 10
 
 # in-memory job tracker: {job_id: {"status": ..., "progress": ..., "error": ...}}
 JOBS = {}
@@ -75,6 +82,10 @@ def process_job(job_id, in_path, fps, max_side):
     os.makedirs(frames_in, exist_ok=True)
     os.makedirs(frames_out, exist_ok=True)
 
+    # never trust client-sent values alone — free tier has only 512MB total
+    fps = min(fps, HARD_MAX_FPS)
+    max_side = min(max_side, HARD_MAX_SIDE) if max_side else HARD_MAX_SIDE
+
     try:
         job["status"] = "extracting_frames"
         run(["ffmpeg", "-y", "-i", in_path, "-vf", f"fps={fps}",
@@ -84,6 +95,11 @@ def process_job(job_id, in_path, fps, max_side):
         total = len(frame_files)
         if total == 0:
             raise RuntimeError("No frames extracted — check the video file.")
+        if total > 250:
+            raise RuntimeError(
+                f"Clip produced {total} frames — too many for free-tier RAM. "
+                f"Use a shorter clip (under ~20 sec at {fps}fps)."
+            )
 
         model = get_model()
         job["status"] = "converting"
@@ -108,6 +124,12 @@ def process_job(job_id, in_path, fps, max_side):
                 out_img = to_image(out)
                 out_img.save(os.path.join(frames_out, fname))
                 job["progress"] = i + 1
+
+                # explicit cleanup — CPU tensors + PIL images can otherwise
+                # accumulate across hundreds of frames on a 512MB instance
+                del img, inp, out, out_img
+                if (i + 1) % 20 == 0:
+                    gc.collect()
 
         job["status"] = "reassembling"
         out_video = os.path.join(work, "anime_no_audio.mp4")
@@ -157,15 +179,16 @@ INDEX_HTML = """
     <input type="file" name="video" accept="video/*" required>
     <label>Output frame rate</label>
     <select name="fps">
-      <option value="8">8 fps (fastest, classic anime feel)</option>
-      <option value="12" selected>12 fps</option>
-      <option value="24">24 fps (slow on free CPU)</option>
+      <option value="6">6 fps (fastest, safest for free tier)</option>
+      <option value="8" selected>8 fps</option>
+      <option value="10">10 fps (max — higher will be capped)</option>
     </select>
     <label>Max resolution (longest side)</label>
     <select name="max_side">
-      <option value="480" selected>480px (fastest)</option>
-      <option value="720">720px</option>
+      <option value="240">240px (fastest, safest for free tier)</option>
+      <option value="360" selected>360px (max — higher will be capped)</option>
     </select>
+    <p style="font-size:0.8rem;color:#666;">Free-tier RAM is limited to 512MB — clips over ~20 sec or higher settings than these may fail. Keep clips short.</p>
     <button type="submit">Convert to Anime</button>
   </form>
   <div id="status"></div>
