@@ -164,16 +164,73 @@ INDEX_HTML = """
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Anime Video Converter</title>
   <style>
-    body { font-family: -apple-system, sans-serif; max-width: 480px; margin: 40px auto; padding: 0 16px; }
-    h1 { font-size: 1.3rem; }
-    input, select, button { width: 100%; padding: 10px; margin: 8px 0; font-size: 1rem; box-sizing: border-box; }
-    button { background: #222; color: white; border: none; border-radius: 6px; }
-    #status { margin-top: 16px; padding: 12px; background: #f2f2f2; border-radius: 6px; font-size: 0.9rem; white-space: pre-wrap; }
-    a.download { display:block; margin-top: 12px; text-align:center; background:#0a7d33; color:white; padding:10px; border-radius:6px; text-decoration:none; }
+    :root {
+      --bg: #0b0f0e;
+      --panel: #121816;
+      --accent: #39ff8f;
+      --accent-dim: #1f8f55;
+      --text: #e6f2ec;
+      --text-dim: #8fa89c;
+      --border: #22302a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: 'Share Tech Mono', 'Courier New', monospace;
+      background: var(--bg);
+      color: var(--text);
+      max-width: 480px;
+      margin: 40px auto;
+      padding: 0 16px;
+    }
+    h1 { font-size: 1.3rem; color: var(--accent); letter-spacing: 0.5px; }
+    p { color: var(--text-dim); }
+    label { color: var(--text-dim); font-size: 0.85rem; display: block; margin-top: 12px; }
+    input, select, button {
+      width: 100%;
+      padding: 10px;
+      margin: 6px 0;
+      font-size: 1rem;
+      font-family: inherit;
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+    }
+    input[type="file"] { padding: 8px; }
+    button {
+      background: var(--accent);
+      color: #06120c;
+      font-weight: bold;
+      border: none;
+      cursor: pointer;
+      margin-top: 16px;
+    }
+    button:hover { background: var(--accent-dim); }
+    #status {
+      margin-top: 16px;
+      padding: 12px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-size: 0.9rem;
+      white-space: pre-wrap;
+      color: var(--accent);
+    }
+    a.download {
+      display: block;
+      margin-top: 12px;
+      text-align: center;
+      background: var(--accent);
+      color: #06120c;
+      font-weight: bold;
+      padding: 10px;
+      border-radius: 6px;
+      text-decoration: none;
+    }
   </style>
 </head>
 <body>
-  <h1>Video → Anime Converter</h1>
+  <h1>▲ VIDEO → ANIME CONVERTER</h1>
   <p>Upload a short clip (10–20s recommended per run on free CPU hosting).</p>
   <form id="f">
     <input type="file" name="video" accept="video/*" required>
@@ -188,7 +245,7 @@ INDEX_HTML = """
       <option value="240">240px (fastest, safest for free tier)</option>
       <option value="360" selected>360px (max — higher will be capped)</option>
     </select>
-    <p style="font-size:0.8rem;color:#666;">Free-tier RAM is limited to 512MB — clips over ~20 sec or higher settings than these may fail. Keep clips short.</p>
+    <p style="font-size:0.8rem;color:var(--text-dim);">Free-tier RAM is limited to 512MB — clips over ~20 sec or higher settings than these may fail. Keep clips short.</p>
     <button type="submit">Convert to Anime</button>
   </form>
   <div id="status"></div>
