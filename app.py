@@ -15,8 +15,8 @@ from model import Generator
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 JOBS_DIR = os.path.join(APP_DIR, "jobs")
-WEIGHTS_PATH = os.path.join(APP_DIR, "weights", "paprika.pt")
-WEIGHTS_URL = "https://github.com/bryandlee/animegan2-pytorch/raw/main/weights/paprika.pt"
+WEIGHTS_PATH = os.path.join(APP_DIR, "weights", "face_paint_512_v2.pt")
+WEIGHTS_URL = "https://github.com/bryandlee/animegan2-pytorch/raw/main/weights/face_paint_512_v2.pt"
 
 os.makedirs(JOBS_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(WEIGHTS_PATH), exist_ok=True)
