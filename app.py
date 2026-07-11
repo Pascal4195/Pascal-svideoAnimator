@@ -253,6 +253,8 @@ INDEX_HTML = """
 <script>
 const form = document.getElementById('f');
 const statusEl = document.getElementById('status');
+const STORAGE_KEY = 'anime_converter_job_id';
+
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
   statusEl.textContent = 'Uploading...';
@@ -261,27 +263,53 @@ form.addEventListener('submit', async (e) => {
   const data = await res.json();
   if (!res.ok) { statusEl.textContent = 'Error: ' + (data.error || 'upload failed'); return; }
   const jobId = data.job_id;
+  localStorage.setItem(STORAGE_KEY, jobId);
   poll(jobId);
 });
 
 async function poll(jobId) {
-  const res = await fetch('/status/' + jobId);
-  const data = await res.json();
+  let res, data;
+  try {
+    res = await fetch('/status/' + jobId);
+    data = await res.json();
+  } catch (err) {
+    // network hiccup — don't give up, just retry
+    statusEl.textContent = 'Connection lost, retrying...';
+    setTimeout(() => poll(jobId), 3000);
+    return;
+  }
+  if (!res.ok) {
+    // job unknown to this server (e.g. it redeployed/restarted) — clear stale ID
+    localStorage.removeItem(STORAGE_KEY);
+    statusEl.textContent = 'This job is no longer available (server may have restarted). Please start a new conversion.';
+    return;
+  }
   let msg = 'Status: ' + data.status;
   if (data.total_frames) {
     msg += '\\nFrames: ' + (data.progress || 0) + ' / ' + data.total_frames;
   }
   statusEl.textContent = msg;
   if (data.status === 'done') {
+    localStorage.removeItem(STORAGE_KEY);
     statusEl.innerHTML = msg + '<br><a class="download" href="/download/' + jobId + '">Download anime video</a>';
     return;
   }
   if (data.status === 'error') {
+    localStorage.removeItem(STORAGE_KEY);
     statusEl.textContent = msg + '\\n' + (data.error || '');
     return;
   }
   setTimeout(() => poll(jobId), 3000);
 }
+
+// on page load, reconnect to an in-progress job if one exists (e.g. after a refresh)
+window.addEventListener('DOMContentLoaded', () => {
+  const savedJobId = localStorage.getItem(STORAGE_KEY);
+  if (savedJobId) {
+    statusEl.textContent = 'Reconnecting to previous job...';
+    poll(savedJobId);
+  }
+});
 </script>
 </body>
 </html>
