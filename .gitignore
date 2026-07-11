@@ -1,6 +1,5 @@
 __pycache__/
 *.pyc
-weights/
 jobs/
 *.mp4
 .DS_Store
