@@ -14,7 +14,7 @@ from flask import Flask, request, jsonify, send_from_directory, render_template_
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 JOBS_DIR = os.path.join(APP_DIR, "jobs")
 # .onnx weights ship inside the repo itself — no runtime download needed
-WEIGHTS_PATH = os.path.join(APP_DIR, "weights", "face_paint_512_v2.onnx")
+WEIGHTS_PATH = os.path.join(APP_DIR, "weights", "paprika.onnx")
 
 os.makedirs(JOBS_DIR, exist_ok=True)
 
@@ -129,14 +129,22 @@ def process_job(job_id, in_path, fps, max_side):
              os.path.join(frames_out, "f_%06d.png"),
              "-c:v", "libx264", "-pix_fmt", "yuv420p", out_video])
 
+        # Upscale to 720p — this is a plain resize on the already-generated
+        # short video, not extra AI work, so it's fast (seconds, not
+        # per-frame). It does NOT add real extra detail beyond what the
+        # source resolution had; it just outputs a proper 720p file.
+        upscaled_video = os.path.join(work, "anime_720p.mp4")
+        run(["ffmpeg", "-y", "-i", out_video, "-vf", "scale=-2:720:flags=lanczos",
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", upscaled_video])
+
         final_video = os.path.join(work, "anime_final.mp4")
         # try to mux original audio back in; fall back to silent video if source has no audio
         try:
-            run(["ffmpeg", "-y", "-i", out_video, "-i", in_path,
+            run(["ffmpeg", "-y", "-i", upscaled_video, "-i", in_path,
                  "-c:v", "copy", "-map", "0:v:0", "-map", "1:a:0?",
                  "-shortest", final_video])
         except Exception:
-            shutil.copy(out_video, final_video)
+            shutil.copy(upscaled_video, final_video)
 
         job["status"] = "done"
         job["result"] = os.path.basename(final_video)
