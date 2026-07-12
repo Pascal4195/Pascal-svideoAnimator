@@ -138,15 +138,17 @@ def process_job(job_id, in_path, fps, max_side):
             out_video = os.path.join(work, "anime_no_audio.mp4")
             run(["ffmpeg", "-y", "-threads", "1", "-framerate", str(fps), "-i",
                  os.path.join(frames_out, "f_%06d.png"),
-                 "-c:v", "libx264", "-pix_fmt", "yuv420p", out_video])
+                 "-c:v", "libx264", "-preset", "ultrafast", "-bf", "0",
+                 "-pix_fmt", "yuv420p", out_video])
 
             # Upscale to 720p — this is a plain resize on the already-generated
             # short video, not extra AI work, so it's fast (seconds, not
             # per-frame). It does NOT add real extra detail beyond what the
             # source resolution had; it just outputs a proper 720p file.
             upscaled_video = os.path.join(work, "anime_720p.mp4")
-            run(["ffmpeg", "-y", "-threads", "1", "-i", out_video, "-vf", "scale=-2:720:flags=lanczos",
-                 "-c:v", "libx264", "-pix_fmt", "yuv420p", upscaled_video])
+            run(["ffmpeg", "-y", "-threads", "1", "-i", out_video, "-vf", "scale=-2:720:flags=bilinear",
+                 "-c:v", "libx264", "-preset", "ultrafast", "-bf", "0",
+                 "-pix_fmt", "yuv420p", upscaled_video])
 
             final_video = os.path.join(work, "anime_final.mp4")
             # try to mux original audio back in; fall back to silent video if source has no audio
