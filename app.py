@@ -32,6 +32,11 @@ HARD_MAX_FPS = 10
 # in-memory job tracker: {job_id: {"status": ..., "progress": ..., "error": ...}}
 JOBS = {}
 
+# Only one job may run frame conversion at a time — free tier RAM can't
+# safely handle two jobs' models/frames in memory simultaneously.
+# Extra uploads wait their turn instead of running concurrently.
+_processing_lock = threading.Lock()
+
 _session = None
 _session_lock = threading.Lock()
 
@@ -79,82 +84,88 @@ def process_job(job_id, in_path, fps, max_side):
     fps = min(fps, HARD_MAX_FPS)
     max_side = min(max_side, HARD_MAX_SIDE) if max_side else HARD_MAX_SIDE
 
-    try:
-        job["status"] = "extracting_frames"
-        run(["ffmpeg", "-y", "-i", in_path, "-vf", f"fps={fps}",
-             os.path.join(frames_in, "f_%06d.png")])
-
-        frame_files = sorted(os.listdir(frames_in))
-        total = len(frame_files)
-        if total == 0:
-            raise RuntimeError("No frames extracted — check the video file.")
-        if total > 250:
-            raise RuntimeError(
-                f"Clip produced {total} frames — too many for free-tier RAM. "
-                f"Use a shorter clip (under ~20 sec at {fps}fps)."
-            )
-
-        model = get_session()
-        job["status"] = "converting"
-        job["total_frames"] = total
-
-        for i, fname in enumerate(frame_files):
-            img = Image.open(os.path.join(frames_in, fname)).convert("RGB")
-            if max_side:
-                w, h = img.size
-                scale = max_side / max(w, h)
-                if scale < 1:
-                    img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
-                # keep dimensions divisible by 8 (model requirement)
-                w2, h2 = img.size
-                w2 -= w2 % 8
-                h2 -= h2 % 8
-                img = img.resize((max(w2, 8), max(h2, 8)), Image.LANCZOS)
-
-            inp = to_input(img)
-            out = model.run(None, {"input": inp})[0]
-            out_img = to_image(out)
-            out_img.save(os.path.join(frames_out, fname))
-            job["progress"] = i + 1
-
-            # explicit cleanup — arrays/images can otherwise accumulate
-            # across hundreds of frames on a 512MB instance
-            del img, inp, out, out_img
-            if (i + 1) % 20 == 0:
-                gc.collect()
-
-        job["status"] = "reassembling"
-        out_video = os.path.join(work, "anime_no_audio.mp4")
-        run(["ffmpeg", "-y", "-framerate", str(fps), "-i",
-             os.path.join(frames_out, "f_%06d.png"),
-             "-c:v", "libx264", "-pix_fmt", "yuv420p", out_video])
-
-        # Upscale to 720p — this is a plain resize on the already-generated
-        # short video, not extra AI work, so it's fast (seconds, not
-        # per-frame). It does NOT add real extra detail beyond what the
-        # source resolution had; it just outputs a proper 720p file.
-        upscaled_video = os.path.join(work, "anime_720p.mp4")
-        run(["ffmpeg", "-y", "-i", out_video, "-vf", "scale=-2:720:flags=lanczos",
-             "-c:v", "libx264", "-pix_fmt", "yuv420p", upscaled_video])
-
-        final_video = os.path.join(work, "anime_final.mp4")
-        # try to mux original audio back in; fall back to silent video if source has no audio
+    job["status"] = "queued"
+    with _processing_lock:  # wait here if another job is currently processing
         try:
-            run(["ffmpeg", "-y", "-i", upscaled_video, "-i", in_path,
-                 "-c:v", "copy", "-map", "0:v:0", "-map", "1:a:0?",
-                 "-shortest", final_video])
-        except Exception:
-            shutil.copy(upscaled_video, final_video)
+            job["status"] = "extracting_frames"
+            run(["ffmpeg", "-y", "-threads", "1", "-i", in_path, "-vf", f"fps={fps}",
+                 os.path.join(frames_in, "f_%06d.png")])
 
-        job["status"] = "done"
-        job["result"] = os.path.basename(final_video)
-    except Exception as e:
-        job["status"] = "error"
-        job["error"] = str(e)
-        traceback.print_exc()
-    finally:
-        shutil.rmtree(frames_in, ignore_errors=True)
-        shutil.rmtree(frames_out, ignore_errors=True)
+            frame_files = sorted(os.listdir(frames_in))
+            total = len(frame_files)
+            if total == 0:
+                raise RuntimeError("No frames extracted — check the video file.")
+            if total > 250:
+                raise RuntimeError(
+                    f"Clip produced {total} frames — too many for free-tier RAM. "
+                    f"Use a shorter clip (under ~20 sec at {fps}fps)."
+                )
+
+            model = get_session()
+            job["status"] = "converting"
+            job["total_frames"] = total
+
+            for i, fname in enumerate(frame_files):
+                img = Image.open(os.path.join(frames_in, fname)).convert("RGB")
+                if max_side:
+                    w, h = img.size
+                    scale = max_side / max(w, h)
+                    if scale < 1:
+                        img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+                    # keep dimensions divisible by 8 (model requirement)
+                    w2, h2 = img.size
+                    w2 -= w2 % 8
+                    h2 -= h2 % 8
+                    img = img.resize((max(w2, 8), max(h2, 8)), Image.LANCZOS)
+
+                inp = to_input(img)
+                out = model.run(None, {"input": inp})[0]
+                out_img = to_image(out)
+                out_img.save(os.path.join(frames_out, fname))
+                job["progress"] = i + 1
+
+                # explicit cleanup — arrays/images can otherwise accumulate
+                # across hundreds of frames on a 512MB instance
+                del img, inp, out, out_img
+                if (i + 1) % 20 == 0:
+                    gc.collect()
+
+            # release any lingering frame/tensor memory before spawning
+            # ffmpeg subprocesses, which add their own memory on top
+            gc.collect()
+
+            job["status"] = "reassembling"
+            out_video = os.path.join(work, "anime_no_audio.mp4")
+            run(["ffmpeg", "-y", "-threads", "1", "-framerate", str(fps), "-i",
+                 os.path.join(frames_out, "f_%06d.png"),
+                 "-c:v", "libx264", "-pix_fmt", "yuv420p", out_video])
+
+            # Upscale to 720p — this is a plain resize on the already-generated
+            # short video, not extra AI work, so it's fast (seconds, not
+            # per-frame). It does NOT add real extra detail beyond what the
+            # source resolution had; it just outputs a proper 720p file.
+            upscaled_video = os.path.join(work, "anime_720p.mp4")
+            run(["ffmpeg", "-y", "-threads", "1", "-i", out_video, "-vf", "scale=-2:720:flags=lanczos",
+                 "-c:v", "libx264", "-pix_fmt", "yuv420p", upscaled_video])
+
+            final_video = os.path.join(work, "anime_final.mp4")
+            # try to mux original audio back in; fall back to silent video if source has no audio
+            try:
+                run(["ffmpeg", "-y", "-threads", "1", "-i", upscaled_video, "-i", in_path,
+                     "-c:v", "copy", "-map", "0:v:0", "-map", "1:a:0?",
+                     "-shortest", final_video])
+            except Exception:
+                shutil.copy(upscaled_video, final_video)
+
+            job["status"] = "done"
+            job["result"] = os.path.basename(final_video)
+        except Exception as e:
+            job["status"] = "error"
+            job["error"] = str(e)
+            traceback.print_exc()
+        finally:
+            shutil.rmtree(frames_in, ignore_errors=True)
+            shutil.rmtree(frames_out, ignore_errors=True)
 
 
 INDEX_HTML = """
@@ -286,6 +297,9 @@ async function poll(jobId) {
     return;
   }
   let msg = 'Status: ' + data.status;
+  if (data.status === 'queued') {
+    msg = 'Waiting — another conversion is currently running. Yours will start automatically.';
+  }
   if (data.total_frames) {
     msg += '\\nFrames: ' + (data.progress || 0) + ' / ' + data.total_frames;
   }
