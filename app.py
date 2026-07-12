@@ -14,7 +14,7 @@ from flask import Flask, request, jsonify, send_from_directory, render_template_
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 JOBS_DIR = os.path.join(APP_DIR, "jobs")
 # .onnx weights ship inside the repo itself — no runtime download needed
-WEIGHTS_PATH = os.path.join(APP_DIR, "weights", "paprika.onnx")
+WEIGHTS_PATH = os.path.join(APP_DIR, "weights", "face_paint_512_v2.onnx")
 
 os.makedirs(JOBS_DIR, exist_ok=True)
 
