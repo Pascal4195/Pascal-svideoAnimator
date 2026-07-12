@@ -146,7 +146,8 @@ def process_job(job_id, in_path, fps, max_side):
             # per-frame). It does NOT add real extra detail beyond what the
             # source resolution had; it just outputs a proper 720p file.
             upscaled_video = os.path.join(work, "anime_720p.mp4")
-            run(["ffmpeg", "-y", "-threads", "1", "-i", out_video, "-vf", "scale=-2:720:flags=bilinear",
+            run(["ffmpeg", "-y", "-threads", "1", "-i", out_video, "-vf",
+                 "scale=-2:720:flags=lanczos,unsharp=5:5:0.6:5:5:0.0",
                  "-c:v", "libx264", "-preset", "ultrafast", "-bf", "0",
                  "-pix_fmt", "yuv420p", upscaled_video])
 
